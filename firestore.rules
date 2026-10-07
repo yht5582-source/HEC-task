@@ -1,0 +1,105 @@
+rules_version = '2';
+// 營養科戰情室 ＋ 衛教室戰情室 Firestore 安全規則（兩個系統共用同一個 Firebase 專案，這份是完整版）
+// 使用前：把下方 DIRECTOR_EMAIL 換成主任登入用的信箱（全小寫），整份貼到
+// Firebase 主控台 → Firestore Database → 規則 → 發布。
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn()   { return request.auth != null && request.auth.token.email_verified == true; }
+    function em()         { return request.auth.token.email.lower(); }
+    function isDirector() { return signedIn() && em() in ['DIRECTOR_EMAIL']; }
+    function rolePath()   { return /databases/$(database)/documents/roles/$(em()); }
+    function hasRole()    { return signedIn() && exists(rolePath()); }
+    function role()       { return get(rolePath()).data.role; }
+    function myStaff()    { return get(rolePath()).data.staffId; }
+    function member()     { return isDirector() || hasRole(); }
+    function lead()       { return isDirector() || (hasRole() && role() in ['組長', '主任']); }
+
+    // 登入名單：每人一份，文件 ID = 小寫信箱
+    match /roles/{email} {
+      allow get: if signedIn() && email == em();
+      allow read: if member();
+      allow write: if isDirector()
+        || (lead() && (resource == null || resource.data.role != '主任')
+              && (request.method == 'delete' || request.resource.data.role in ['組長', '營養師']));
+    }
+
+    match /staff/{id}  { allow read: if member(); allow write: if lead(); }
+    match /config/{id} { allow read: if member(); allow write: if lead(); }
+
+    // 出勤：只有主任與組長能寫
+    match /att/{month} { allow read: if member(); allow write: if lead(); }
+
+    // 業務量：全員可登錄
+    match /months/{month} { allow read, write: if member(); }
+
+    // 任務
+    match /tasks/{id} {
+      allow read: if member();
+      allow create: if lead()
+        || (member() && request.resource.data.staffId == myStaff() && request.resource.data.source == 'self');
+      allow update: if lead()
+        || (member() && resource.data.staffId == myStaff()                    // 負責人修改自己的任務
+              && request.resource.data.staffId == resource.data.staffId
+              && request.resource.data.source == resource.data.source)
+        || (member() && resource.data.staffId == ''                           // 認領開放任務
+              && request.resource.data.staffId == myStaff()
+              && request.resource.data.source == 'claimed');
+      allow delete: if lead();
+    }
+
+    // 請假申請
+    match /leaves/{id} {
+      allow read: if member();
+      allow create: if member() && request.resource.data.staffId == myStaff() && request.resource.data.status == 'pending';
+      allow update: if lead()
+        || (member() && resource.data.staffId == myStaff() && resource.data.status == 'pending'
+              && request.resource.data.status == 'cancelled');
+      allow delete: if false;
+    }
+
+    // 站內通知
+    match /notices/{id} {
+      allow read, create: if member();
+      allow update: if member() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readBy']);
+      allow delete: if lead();
+    }
+  
+    // ===================== 衛教室（hec_ 開頭的資料表） =====================
+    function hecPath()   { return /databases/$(database)/documents/hec_roles/$(em()); }
+    function hecHas()    { return signedIn() && exists(hecPath()); }
+    function hecRole()   { return get(hecPath()).data.role; }
+    function hecStaff()  { return get(hecPath()).data.staffId; }
+    function hecMember() { return isDirector() || hecHas(); }
+    function hecLead()   { return isDirector() || (hecHas() && hecRole() in ['負責人', '主任']); }
+
+    match /hec_roles/{email} {
+      allow get: if signedIn() && email == em();
+      allow read: if hecMember();
+      allow write: if isDirector()
+        || (hecLead() && (resource == null || resource.data.role != '主任')
+              && (request.method == 'delete' || request.resource.data.role in ['負責人', '成員']));
+    }
+    match /hec_staff/{id}  { allow read: if hecMember(); allow write: if hecLead(); }
+    match /hec_config/{id} { allow read: if hecMember(); allow write: if hecLead(); }
+    match /hec_months/{month} { allow read, write: if hecMember(); }
+    match /hec_tasks/{id} {
+      allow read: if hecMember();
+      allow create: if hecLead()
+        || (hecMember() && request.resource.data.staffId == hecStaff() && request.resource.data.source == 'self');
+      allow update: if hecLead()
+        || (hecMember() && resource.data.staffId == hecStaff()
+              && request.resource.data.staffId == resource.data.staffId
+              && request.resource.data.source == resource.data.source)
+        || (hecMember() && resource.data.staffId == ''
+              && request.resource.data.staffId == hecStaff()
+              && request.resource.data.source == 'claimed');
+      allow delete: if hecLead();
+    }
+    match /hec_notices/{id} {
+      allow read, create: if hecMember();
+      allow update: if hecMember() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readBy']);
+      allow delete: if hecLead();
+    }
+  }
+}
